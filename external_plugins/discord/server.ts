@@ -118,6 +118,14 @@ type Access = {
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
+  /**
+   * Opt-in: post permission requests to this guild channel (snowflake) instead
+   * of DMing each allowlisted user. The Allow/Deny buttons stay gated by
+   * `allowFrom` (see the interactionCreate handler), so even though the prompt
+   * is visible in the channel, only allowlisted users can act on it. Unset =
+   * default DM behavior.
+   */
+  permissionChannel?: string
 }
 
 function defaultAccess(): Access {
@@ -162,6 +170,7 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      permissionChannel: parsed.permissionChannel,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -504,6 +513,44 @@ mcp.setNotificationHandler(
         .setEmoji('❌')
         .setStyle(ButtonStyle.Danger),
     )
+    // Opt-in channel routing: if permissionChannel is set, post the prompt
+    // there instead of DMing. Buttons remain gated by allowFrom, so only
+    // allowlisted users can approve even though the message is visible in the
+    // channel. Falls back to DMs if the channel can't be reached.
+    if (access.permissionChannel) {
+      // Surface the command/input inline so it can be approved without the
+      // extra "See more" click (the channel is opt-in, so this detail is
+      // wanted — especially when approving from mobile).
+      let preview = input_preview
+      try { preview = JSON.stringify(JSON.parse(input_preview), null, 2) } catch {}
+      if (preview.length > 1500) preview = preview.slice(0, 1500) + '\n…(truncated, tap See more)'
+      const channelText =
+        `${text}${description ? `\n${description}` : ''}\n\`\`\`\n${preview}\n\`\`\``
+      void (async () => {
+        try {
+          const ch = await client.channels.fetch(access.permissionChannel!)
+          if (ch && ch.isTextBased() && 'send' in ch) {
+            await ch.send({ content: channelText, components: [row] })
+            return
+          }
+          throw new Error('permissionChannel is not a sendable text channel')
+        } catch (e) {
+          process.stderr.write(
+            `permission_request send to channel ${access.permissionChannel} failed, falling back to DMs: ${e}\n`,
+          )
+          for (const userId of access.allowFrom) {
+            try {
+              const user = await client.users.fetch(userId)
+              await user.send({ content: text, components: [row] })
+            } catch (err) {
+              process.stderr.write(`permission_request send to ${userId} failed: ${err}\n`)
+            }
+          }
+        }
+      })()
+      return
+    }
+
     for (const userId of access.allowFrom) {
       void (async () => {
         try {
